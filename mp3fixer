@@ -1,0 +1,185 @@
+#!/bin/bash
+
+TEMPFILE=/tmp/mp3fixer.out.$$
+
+EditTags()
+{
+    read -e -p "Please enter artist ($1): " artist
+    [ x"$artist" = x ] && artist=$1
+    id3v2 -a "$artist" "$file"
+    read -e -p "Please enter title ($2): " title
+    [ x"$title" = x ] && title=$2
+    id3v2 -t "$title" "$file"
+    v1title=$title
+    v2title=$title
+    v1artist=$artist
+    v2artist=$artist
+}
+
+CheckFileName()
+{
+  OldFileName=""
+  NewFileName="$artist - $title.mp3"
+  if [ x"$file" != x"$NewFileName" ]
+  then
+    echo "  I think the filename should be changed (x to skip, i to edit tags)"
+    read -e -p "  Please enter new filename ($NewFileName): " OldFileName
+    if [ x"$OldFileName" = xi ]
+    then
+      EditTags "$artist" "$title"
+      return 1
+    fi
+    if [ x"$OldFileName" = x ]
+    then
+      OldFileName="$NewFileName"
+    fi
+    if [ x"$OldFileName" != xx ]
+    then
+      mv "$file" "$OldFileName"
+    fi
+  fi
+  return 0
+}
+
+for file in *.mp3
+do
+  echo "examining $file"
+  id3v2 -l "$file" >$TEMPFILE
+
+  artist=""
+  title=""
+
+  # Come up with possible artist/songname, based on filename.
+  fNameArtist=`echo "$file" | awk -F" -" '{ print $1 }'`
+  fNameTitle=`echo "$file" | awk -F"- " '{ print $NF }' | \
+     awk -F".mp3" '{ print $1 }'`
+
+  # Collect the v1 artist and songname
+  v1artist=`grep "Artist: " $TEMPFILE | awk -F"Artist: " '{ print $NF }' | sed 's/^[ \t]*//;s/[ \t]*$//'`
+  v1title=`grep "Title *:.*" $TEMPFILE | sed 's/ *Artist.*//' | awk -F": " '{ print $NF }' | sed 's/^[ \t]*//;s/[ \t]*$//'`
+
+  # Now collect the v2 artist and songname.  Check for some
+  # alternate v2.2 tags too.
+  v2artist=`grep TPE1 $TEMPFILE | awk -F": " '{print $NF }'`
+  [ x"$v2artist" == x ] && \
+    v2artist=`grep TP1 $TEMPFILE | awk -F": " '{print $NF }'`
+  v2title=`grep TIT2 $TEMPFILE | awk -F": " '{print $NF }'`
+  [ x"$v2title" == x ] && \
+    v2title=`grep TT2 $TEMPFILE | awk -F": " '{print $NF }'`
+  
+#echo "fNameArtist: $fNameArtist xxx"
+#echo "fNameTitle: $fNameTitle xxx"
+#echo "v1artist: $v1artist xxx"
+#echo "v2artist: $v2artist xxx"
+#echo "v1title: $v1title xxx"
+#echo "v2title: $v2title xxx"
+
+  # If file has no tags, create them based on filename
+  if grep -q "No ID3 tag" $TEMPFILE
+  then
+    echo "no tags on file, creating v1 and v2 tags"
+    EditTags "$fNameArtist" "$fNameTitle"
+  fi
+
+  # If file has bogus v1 artist tag, get rid of it.
+  if echo $v1artist | grep -q "^artist"
+  then
+    echo "bogus v1 artist $v1artist, removing"
+    id3v2 -1 -a"" "$file"
+    v1artist=""
+  fi
+
+  # If file has bogus v1 title, get rid of it.
+  if echo $v1title | grep -q "^title"
+  then
+    echo "bogus v1 title $v1title, removing"
+    id3v2 -1 -t"" "$file"
+    v1title=""
+  fi
+
+  # If file has bogus v2 artist tag, get rid of it.
+  if echo $v2artist | grep -q "^artist"
+  then
+    echo "bogus v2 artist $v2artist, removing"
+    id3v2 -2 -a\"\" "$file"
+    v2artist=""
+  fi
+
+  # If file has bogus v2 title, get rid of it.
+  if echo $v2title | grep -q "^title"
+  then
+    echo "bogus v2 title $v2title, removing"
+    id3v2 -2 -t"" "$file"
+    v2title=""
+  fi
+
+  # If file has v1 artist and title but no v2 artist or title, 
+  # convert the v1 tags to v2 tags.
+  if [ -n "$v1artist" -a -n "$v1title" -a -z "$v2artist" -a -z "$v2title" ]
+  then
+    echo "converting v1 tags to v2"
+    id3v2 -C "$file"
+    artist=$v1artist
+    title=$v1title
+    v2title=$title
+    v2artist=$artist
+  fi
+
+  if [ -n "$v2artist" -a -z "$v1artist" ]
+  then
+    # If file has v2 artist name, use it for v1 artist name as well.
+    echo "copying v2 artist to v1 artist"
+    id3v2 -a "$v2artist" "$file"
+    artist=$v2artist
+    v1artist=$v2artist
+  elif [ -n "$v1artist" -a -z "$v2artist" ]
+  then
+    # Copy v1 artist to v2
+    echo "copying v1 artist to v2 artist"
+    id3v2 -a "$v1artist" "$file"
+    artist=$v1artist
+    v2artist=$artist
+  else
+    artist=$v2artist
+  fi
+
+  if [ -n "$v2title" -a -z "$v1title" ]
+  then
+    # If file has v2 song title, use it for v1 song title too.
+    echo "copying v2 title to v1 title"
+    id3v2 -t "$v2title" "$file"
+    title=$v2title
+    v1title=$title
+  elif [ -n "$v1title" -a -z "$v2title" ]
+  then
+    # Copy v1 title to v2.
+    echo "copying v1 title to v2 title"
+    id3v2 -t "$v1title" "$file"
+    title=$v1title
+    v2title=$title
+  else
+    title=$v2title
+  fi
+
+  # If v2title is a subset of the title we parsed from the filename, substitute
+  # the filename title for the v2title (because v2title probably got truncated)
+  # also skip this if v2title is just empty, otherwise the grep always matches.
+  if [ "$fNameTitle" != "$v2title" ] && \
+    [ x"$v2title" != x"" ] && \
+    echo "$fNameTitle" | grep -q "^$v2title"
+  then
+    echo "v2title is subset of filename title.  Restoring v2title"
+    id3v2 -t "$fNameTitle" "$file"
+    v2title=$fNameTitle
+    title=$v2title
+  fi
+
+  # Make sure the filename is sensible
+  ReCheck=yes
+  until [ x"$ReCheck" = xno ]
+  do
+    CheckFileName && ReCheck=no
+  done
+
+  rm -f $TEMPFILE
+done
